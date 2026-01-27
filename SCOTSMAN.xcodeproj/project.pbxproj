@@ -6,8 +6,13 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		5FA67B702F2968C4001FC72E /* HubSpotService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FA67B6F2F2968C4001FC72E /* HubSpotService.swift */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		5FA67B562F2956EA001FC72E /* SCOTSMAN.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SCOTSMAN.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		5FA67B6F2F2968C4001FC72E /* HubSpotService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HubSpotService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -34,6 +39,7 @@
 			children = (
 				5FA67B582F2956EA001FC72E /* SCOTSMAN */,
 				5FA67B572F2956EA001FC72E /* Products */,
+				5FA67B6F2F2968C4001FC72E /* HubSpotService.swift */,
 			);
 			sourceTree = "<group>";
 		};
@@ -119,6 +125,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				5FA67B702F2968C4001FC72E /* HubSpotService.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
