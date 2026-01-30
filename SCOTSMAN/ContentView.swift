@@ -8,10 +8,13 @@
 import SwiftUI
 import CoreData
 import Combine
+import UIKit
 
 
 
 struct ContentView: View {
+    
+    
     @State private var isShowingSettings = false
     @State private var isAuthenticating = false
     
@@ -80,7 +83,10 @@ struct ContentView: View {
     }
 }
 
+
+
 struct SettingsView: View {
+    
     @Binding var isPresented: Bool
     @State private var isConnectingHubSpot = false
     @AppStorage("hubSpotSyncEnabled") private var hubSpotSyncEnabled: Bool = false
@@ -88,6 +94,7 @@ struct SettingsView: View {
     
     @State private var showAlert = false
     @State private var alertMessage = ""
+    @State private var showImportOpportunities = false
     
     var body: some View {
         NavigationStack {
@@ -126,6 +133,23 @@ struct SettingsView: View {
                     
                     Toggle("Sync with HubSpot", isOn: $hubSpotSyncEnabled)
                         .disabled(!hubSpotService.isConnected)
+
+                    Section(header: Text("Import")) {
+                        Button {
+                            showImportOpportunities = true
+                        } label: {
+                            HStack {
+                                Spacer()
+                                Text("Import Opportunities")
+                                Spacer()
+                            }
+                        }
+                        .disabled(!hubSpotService.isConnected)
+
+                        Text("Search HubSpot deals and import the selected opportunities. We’ll pull the associated company and contacts as part of the import.")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                    }
                     
                     if hubSpotSyncEnabled && hubSpotService.isConnected {
                         Text("Changes in this app will be synchronized to HubSpot.")
@@ -148,27 +172,395 @@ struct SettingsView: View {
                     }
                 }
             }
+        
+            
+            .onAppear {
+                // ✅ Refresh connection state from backend whenever Settings opens
+                hubSpotService.refreshConnectionStatus()
+
+                let info = Bundle.main.infoDictionary ?? [:]
+                print("[SettingsView] Bundle ID:", Bundle.main.bundleIdentifier ?? "nil")
+                print("[SettingsView] Info keys containing 'SCOTSMAN':",
+                      info.keys.filter { $0.uppercased().contains("SCOTSMAN") }.sorted())
+
+                print("[SettingsView] Backend raw:",
+                      info["SCOTSMAN_BACKEND_BASE_URL"] as Any)
+
+                print("[SettingsView] API Key raw:",
+                      info["SCOTSMAN_API_KEY"] as Any)
+            }
+            
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+                hubSpotService.refreshConnectionStatus()
+            }
+            
             .onReceive(hubSpotService.$isConnected) { _ in
                 // Update UI when connection changes
             }
             .alert(isPresented: $showAlert) {
                 Alert(title: Text("HubSpot Connection"), message: Text(alertMessage), dismissButton: .default(Text("OK")))
             }
+            .sheet(isPresented: $showImportOpportunities) {
+                ImportOpportunitiesView()
+            }
         }
     }
     
     private func connectHubSpot() {
         isConnectingHubSpot = true
-        HubSpotService.shared.startOAuth { success in
-            isConnectingHubSpot = false
-            if success {
-                alertMessage = "Successfully connected to HubSpot."
-                hubSpotSyncEnabled = true
-            } else {
-                alertMessage = "Failed to connect to HubSpot. Please try again."
+
+        // Backend-first: start OAuth via your Vercel backend (NOT directly via HubSpot).
+        HubSpotService.shared.connectInBrowser()
+
+        isConnectingHubSpot = false
+        alertMessage = "HubSpot login opened in your browser. Complete authorization, then return to the app."
+        showAlert = true
+    }
+}
+
+// MARK: - HubSpot Import UI
+
+struct ImportOpportunitiesView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.managedObjectContext) private var viewContext
+
+    @State private var query: String = ""
+    @State private var isLoading = false
+    @State private var results: [HubSpotDealSearchItem] = []
+    @State private var selected = Set<String>()
+    @State private var errorMessage: String? = nil
+
+    // simple progress info for sequential fetch
+    @State private var importingCount: Int = 0
+    @State private var totalToImport: Int = 0
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 12) {
+                HStack(spacing: 10) {
+                    TextField("Search deals by name…", text: $query)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+
+                    Button("Search") {
+                        search()
+                    }
+                    .disabled(isLoading)
+                }
+                .padding(.horizontal)
+                .padding(.top, 8)
+
+                if isLoading {
+                    ProgressView(totalToImport > 0 ? "Importing \(importingCount)/\(totalToImport)…" : "Loading…")
+                        .padding(.top, 8)
+                }
+
+                if let errorMessage {
+                    Text(errorMessage)
+                        .foregroundStyle(.red)
+                        .padding(.horizontal)
+                }
+
+                if results.isEmpty {
+                    Spacer()
+                    Text("Search HubSpot deals to import.")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                } else {
+                    List {
+                        ForEach(results, id: \.id) { deal in
+                            Button {
+                                toggleSelection(deal.id)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: selected.contains(deal.id) ? "checkmark.circle.fill" : "circle")
+                                        .foregroundColor(selected.contains(deal.id) ? .accentColor : .secondary)
+
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(deal.dealname.isEmpty ? "(No name)" : deal.dealname)
+                                            .font(.headline)
+                                            .foregroundColor(.primary)
+
+                                        HStack(spacing: 10) {
+                                            if let stage = deal.dealstage, !stage.isEmpty {
+                                                Text("Stage: \(stage)")
+                                            }
+                                            if let amount = deal.amount, !amount.isEmpty {
+                                                Text("Amount: \(amount)")
+                                            }
+                                        }
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    }
+
+                                    Spacer()
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .listStyle(.insetGrouped)
+                }
             }
-            showAlert = true
+            .navigationTitle("Import Opportunities")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Import") {
+                        importSelected()
+                    }
+                    .disabled(selected.isEmpty || isLoading)
+                }
+            }
         }
+    }
+
+    private func toggleSelection(_ id: String) {
+        if selected.contains(id) {
+            selected.remove(id)
+        } else {
+            selected.insert(id)
+        }
+    }
+
+    private func search() {
+        errorMessage = nil
+        isLoading = true
+        importingCount = 0
+        totalToImport = 0
+
+        HubSpotService.shared.searchDeals(query: query, limit: 25) { result in
+            isLoading = false
+            switch result {
+            case .success(let items):
+                results = items
+                // keep selection only for ids still present
+                let ids = Set(items.map { $0.id })
+                selected = selected.filter { ids.contains($0) }
+            case .failure(let err):
+                errorMessage = err.localizedDescription
+                results = []
+                selected.removeAll()
+            }
+        }
+    }
+
+    private func importSelected() {
+        errorMessage = nil
+        isLoading = true
+
+        let ids = Array(selected)
+        totalToImport = ids.count
+        importingCount = 0
+
+        fetchBundlesSequentially(ids: ids, index: 0)
+    }
+
+    private func fetchBundlesSequentially(ids: [String], index: Int) {
+        if index >= ids.count {
+            isLoading = false
+            return
+        }
+
+        let dealId = ids[index]
+        HubSpotService.shared.fetchDealBundle(dealId: dealId) { result in
+            switch result {
+            case .success(let bundle):
+                importingCount = index + 1
+
+                do {
+                    try importBundleIntoCoreData(bundle)
+                    try viewContext.save()
+                    print("[Import] ✅ Saved to Core Data: \(bundle.deal.dealname)")
+                } catch {
+                    errorMessage = "Failed saving deal \(dealId): \(error.localizedDescription)"
+                    isLoading = false
+                    return
+                }
+
+                fetchBundlesSequentially(ids: ids, index: index + 1)
+
+            case .failure(let err):
+                errorMessage = "Failed importing deal \(dealId): \(err.localizedDescription)"
+                isLoading = false
+            }
+        }
+    }
+    
+    // MARK: - Core Data Import
+
+    private func importBundleIntoCoreData(_ bundle: HubSpotDealBundle) throws {
+        // Ensure we mutate Core Data on its queue.
+        var caught: Error?
+
+        viewContext.performAndWait {
+            do {
+                let companyObj = try upsertCompany(from: bundle.company)
+                let contactObjs = try upsertContacts(from: bundle.contacts, company: companyObj)
+                let dealObj = try upsertDeal(from: bundle.deal, company: companyObj)
+
+                // Deal ↔ Company
+                if let companyObj {
+                    dealObj.company = companyObj
+                    companyObj.addToDeals(dealObj)
+                }
+
+                // Deal ↔ Contacts (replace)
+                if let current = dealObj.contacts as? Set<Contact> {
+                    current.forEach { dealObj.removeFromContacts($0) }
+                }
+                contactObjs.forEach { dealObj.addToContacts($0) }
+
+                // Contacts ↔ Deal + Company
+                contactObjs.forEach { contact in
+                    contact.addToDeals(dealObj)
+                    if let companyObj {
+                        contact.company = companyObj
+                        companyObj.addToContacts(contact)
+                    }
+                }
+
+            } catch {
+                caught = error
+            }
+        }
+
+        if let caught { throw caught }
+    }
+
+    private func upsertCompany(from company: HubSpotDealBundle.Company?) throws -> Company? {
+        guard let company else { return nil }
+
+        let name = (company.name ?? "").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        if name.isEmpty { return nil }
+
+        let domain = (company.domain ?? "").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+
+        let req = NSFetchRequest<Company>(entityName: "Company")
+        if !domain.isEmpty {
+            req.predicate = NSPredicate(format: "domain ==[c] %@", domain)
+        } else {
+            req.predicate = NSPredicate(format: "name ==[c] %@", name)
+        }
+        req.fetchLimit = 1
+
+        let existing = try viewContext.fetch(req).first
+        let obj = existing ?? Company(context: viewContext)
+
+        if obj.id == nil || obj.id?.isEmpty == true {
+            obj.id = UUID().uuidString
+        }
+
+        obj.name = name
+        if !domain.isEmpty { obj.domain = domain }
+
+        obj.updatedAt = Date()
+        if obj.createdAt == nil { obj.createdAt = Date() }
+
+        return obj
+    }
+
+    private func upsertContacts(from contacts: [HubSpotDealBundle.Contact], company: Company?) throws -> [Contact] {
+        var out: [Contact] = []
+        out.reserveCapacity(contacts.count)
+
+        for c in contacts {
+            let email = (c.email ?? "").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            let first = (c.firstname ?? "").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            let last = (c.lastname ?? "").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+
+            if email.isEmpty && first.isEmpty && last.isEmpty {
+                continue
+            }
+
+            let req = NSFetchRequest<Contact>(entityName: "Contact")
+            if !email.isEmpty {
+                req.predicate = NSPredicate(format: "email ==[c] %@", email)
+            } else if let companyName = company?.name, !companyName.isEmpty {
+                req.predicate = NSPredicate(format: "firstName ==[c] %@ AND lastName ==[c] %@ AND company.name ==[c] %@", first, last, companyName)
+            } else {
+                req.predicate = NSPredicate(format: "firstName ==[c] %@ AND lastName ==[c] %@", first, last)
+            }
+            req.fetchLimit = 1
+
+            let existing = try viewContext.fetch(req).first
+            let obj = existing ?? Contact(context: viewContext)
+
+            if !first.isEmpty { obj.firstName = first }
+            if !last.isEmpty { obj.lastName = last }
+            if !email.isEmpty { obj.email = email }
+
+            if let company { obj.company = company }
+
+            out.append(obj)
+        }
+
+        return out
+    }
+
+    private func upsertDeal(from deal: HubSpotDealBundle.Deal, company: Company?) throws -> Deal {
+        let rawName = deal.dealname.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        let name = rawName.isEmpty ? "(No name)" : rawName
+
+        let stage = (deal.dealstage ?? "").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+
+        let req = NSFetchRequest<Deal>(entityName: "Deal")
+        if let companyName = company?.name, !companyName.isEmpty {
+            req.predicate = NSPredicate(format: "name ==[c] %@ AND company.name ==[c] %@", name, companyName)
+        } else {
+            req.predicate = NSPredicate(format: "name ==[c] %@", name)
+        }
+        req.fetchLimit = 1
+
+        let existing = try viewContext.fetch(req).first
+        let obj = existing ?? Deal(context: viewContext)
+
+        obj.name = name
+        if !stage.isEmpty { obj.stage = stage }
+
+        if let amountStr = deal.amount,
+           !amountStr.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
+            let cleaned = amountStr.replacingOccurrences(of: ",", with: "")
+            let num = NSDecimalNumber(string: cleaned)
+            if num != NSDecimalNumber.notANumber {
+                obj.amount = num
+            }
+        }
+
+        if let closeRaw = deal.closedate, let d = parseHubSpotDate(closeRaw) {
+            obj.closeDate = d
+        }
+
+        if let company { obj.company = company }
+
+        return obj
+    }
+
+    private func parseHubSpotDate(_ raw: String) -> Date? {
+        let trimmed = raw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        if trimmed.isEmpty { return nil }
+
+        // HubSpot often returns milliseconds since epoch as a string
+        if let n = Double(trimmed) {
+            if n > 100000000000 { // ms
+                return Date(timeIntervalSince1970: n / 1000.0)
+            } else if n > 1000000000 { // seconds
+                return Date(timeIntervalSince1970: n)
+            }
+        }
+
+        let iso = ISO8601DateFormatter()
+        if let d = iso.date(from: trimmed) { return d }
+
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSZ"
+        return df.date(from: trimmed)
     }
 }
 
@@ -185,7 +577,7 @@ struct CompaniesView: View {
     
     var body: some View {
         List {
-            ForEach(companies) { company in
+            ForEach(companies, id: \.objectID) { company in
                 Button {
                     companyToEdit = company
                 } label: {
@@ -457,8 +849,8 @@ struct ContactsView: View {
     @FetchRequest(
         entity: Contact.entity(),
         sortDescriptors: [
-            NSSortDescriptor(keyPath: \Contact.lastName, ascending: true),
-            NSSortDescriptor(keyPath: \Contact.firstName, ascending: true)
+            NSSortDescriptor(key: "lastName", ascending: true),
+            NSSortDescriptor(key: "firstName", ascending: true)
         ],
         animation: .default)
     private var contacts: FetchedResults<Contact>
@@ -584,7 +976,7 @@ struct ContactFormSheet: View {
     private var companies: FetchedResults<Company>
     
     @FetchRequest(
-        sortDescriptors: [NSSortDescriptor(keyPath: \Deal.name, ascending: true)],
+        sortDescriptors: [NSSortDescriptor(key: "name", ascending: true)],
         animation: .default)
     private var opportunities: FetchedResults<Deal>
     
@@ -729,7 +1121,7 @@ struct OpportunitiesView: View {
     @Environment(\.managedObjectContext) private var viewContext
     
     @FetchRequest(
-        sortDescriptors: [NSSortDescriptor(keyPath: \Deal.name, ascending: true)],
+        sortDescriptors: [NSSortDescriptor(key: "name", ascending: true)],
         animation: .default)
     private var deals: FetchedResults<Deal>
     
@@ -847,8 +1239,8 @@ struct OpportunityFormSheet: View {
     
     @FetchRequest(
         sortDescriptors: [
-            NSSortDescriptor(keyPath: \Contact.lastName, ascending: true),
-            NSSortDescriptor(keyPath: \Contact.firstName, ascending: true)
+            NSSortDescriptor(key: "lastName", ascending: true),
+            NSSortDescriptor(key: "firstName", ascending: true)
         ],
         animation: .default)
     private var contacts: FetchedResults<Contact>
@@ -1134,9 +1526,5 @@ extension NumberFormatter {
         formatter.usesGroupingSeparator = true
         return formatter
     }
-}
-
-#Preview {
-    ContentView()
 }
 
